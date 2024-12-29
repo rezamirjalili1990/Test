@@ -1,0 +1,108 @@
+from libc.math cimport floor
+from cython.parallel import prange
+from libcpp.vector cimport vector
+
+# Calculate the reduced cost
+cdef double reduced_cost(double weight, vector[double]& pi, vector[double]& a, double res_max):
+    cdef double total_cost = 0
+    cdef size_t i
+    for i in range(len(pi)):
+        total_cost += pi[i] * a[i]
+    return floor(total_cost / res_max) * weight
+
+# Check if propagation should continue
+cdef bool ContinuePropagation(vector[bool]& O, vector[bool]& N):
+    cdef size_t i
+    for i in range(len(O)):
+        if O[i] and not N[i]:
+            return True
+    return False
+
+# Function to apply label dominance across all paths
+cdef void AllLabelDominance(
+    int n, int num_resources, 
+    vector[int]& I, vector[bool]& N, 
+    vector[vector[bool]]& visit, vector[vector[bool]]& U, 
+    vector[vector[double]]& R, vector[bool]& O, 
+    vector[int]& V, vector[double]& lb
+):
+    cdef size_t i, j
+    cdef vector[int] to_remove
+    to_remove.reserve(len(O))
+
+    for i in range(len(O)):
+        if not O[i]:
+            continue
+        for j in range(i + 1, len(O)):
+            if not O[j]:
+                continue
+            
+            # Compare paths based on resources
+            if dominates(i, j, R, lb, visit, num_resources):
+                to_remove.push_back(j)
+            elif dominates(j, i, R, lb, visit, num_resources):
+                to_remove.push_back(i)
+                break
+
+    # Remove dominated paths
+    for i in reversed(to_remove):
+        O[i] = False
+
+# Helper function to determine dominance between two paths
+cdef bool dominates(
+    int i, int j, vector[vector[double]]& R, 
+    vector[double]& lb, vector[vector[bool]]& visit, int num_resources
+):
+    cdef int k
+
+    # Dominance conditions
+    if lb[i] > lb[j]:
+        return False
+    for k in range(num_resources):
+        if R[i][k] > R[j][k]:
+            return False
+    for k in range(len(visit[i])):
+        if visit[i][k] and not visit[j][k]:
+            return False
+    return True
+
+# Function to propagate labels through the graph
+cdef void propagate(
+    size_t Nxt, vector[int]& I, vector[bool]& N, 
+    vector[vector[bool]]& visit, vector[vector[bool]]& U, 
+    vector[vector[int]]& P, vector[vector[double]]& R, 
+    vector[bool]& O, vector[int]& V, 
+    vector[double]& lb, double ub,
+    double[:,:,:] r, double[:] r_max
+):
+    cdef int num_resources = r.shape[2]
+    cdef int num_nodes = len(U[0])
+    cdef size_t j, ch_index
+
+    parent_vertex = V[Nxt]
+    for j in range(num_nodes):
+        if U[Nxt][j]:
+            # Create a new child index
+            ch_index = len(I)
+            I.push_back(I[Nxt] + 1)
+            N.push_back(False)
+            visit.push_back(visit[Nxt][:])
+            visit[ch_index][j] = True
+            U.push_back(U[Nxt][:])
+            U[ch_index][j] = False
+
+            # Update resources
+            R.push_back([R[Nxt][k] + r[parent_vertex, j, k] for k in range(num_resources)])
+
+            # Check resource feasibility
+            for k in range(num_resources):
+                if R[ch_index][k] > r_max[k]:
+                    continue
+
+            # Update path
+            P.push_back(P[Nxt][:])
+            P[ch_index].push_back(j)
+
+            # Check dominance and feasibility
+            flag = all(R[ch_index][l] <= r_max[l] for l in range(num_resources))
+            O.push_back(flag)
